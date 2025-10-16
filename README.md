@@ -53,7 +53,7 @@ The backend provides:
 
 ```bash
 # Clone the repository
-git clone https://github.com/zaibten/Smart-Labor-Hiring-System.git
+git clone https://github.com/fyplabourhiring-max/Smart-Labor-Hiring-System.git
 
 # Navigate into server
 cd Smart-Labor-Hiring-System/server
@@ -115,4 +115,5 @@ This backend provides the **foundation** for a scalable labor management platfor
 ## 📜 License  
 This project is licensed under the **MIT License** – free to use, modify, and distribute.  
 
-👉 **Developed with passion by [Zaibten](https://github.com/zaibten)**  
+👉 **Developed with passion by [fyplabourhiring-max](https://github.com/fyplabourhiring-max)**  
+
