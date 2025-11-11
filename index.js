@@ -17,6 +17,7 @@ const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const validator = require("validator");
 const twilio = require("twilio");
+const sgMail = require("@sendgrid/mail");
 require("dotenv").config();
 
 const app = express();
@@ -545,12 +546,17 @@ const userSchema = new mongoose.Schema(
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
     passwordHash: { type: String, required: true },
     role: { type: String, enum: ["Labour", "Contractor"], default: "Labour" },
+    image: { 
+      type: String, 
+      default: "https://res.cloudinary.com/dh7kv5dzy/image/upload/v1762757911/Pngtree_user_profile_avatar_13369988_qdlgmg.png" 
+    },
     createdAt: { type: Date, default: Date.now },
   },
   { timestamps: true }
 );
 
 const User = mongoose.model("User", userSchema);
+
 
 /* ---------- Helpers ---------- */
 
@@ -721,6 +727,9 @@ app.post("/api/forgot-password", async (req, res) => {
 
 const client = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
+// ---------------- SendGrid Setup ----------------
+sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+
 app.post("/api/reset-password", async (req, res) => {
   try {
     const { email, newPassword } = req.body;
@@ -731,38 +740,81 @@ app.post("/api/reset-password", async (req, res) => {
     if (!user) return res.status(404).json({ error: "User not found." });
 
     const isSame = await bcrypt.compare(newPassword, user.passwordHash);
-    if (isSame) {
-      return res.status(400).json({ error: "New password must be different from your old password." });
-    }
+    if (isSame)
+      return res
+        .status(400)
+        .json({ error: "New password must be different from your old password." });
 
     const saltRounds = parseInt(process.env.BCRYPT_SALT_ROUNDS || "10", 10);
     const passwordHash = await bcrypt.hash(newPassword, saltRounds);
     user.passwordHash = passwordHash;
     await user.save();
 
-    // ---------------- Normalize phone number ----------------
-    let normalizedPhone = user.phone.trim();
-    if (normalizedPhone.startsWith("0")) {
-      normalizedPhone = "+92" + normalizedPhone.slice(1);
-    }
+    // ---------------- Read and Encode Logo ----------------
+    const logoPath = "assets/logo.png";
+    const logoBase64 = fs.readFileSync(logoPath).toString("base64");
 
-    // ---------------- Send SMS ----------------
+    // ---------------- Send Email ----------------
     try {
-      // SMS (trial: must be verified number)
-      await client.messages.create({
-        body: "Your Labour Hub Application password has been changed successfully.",
-        from: process.env.TWILIO_PHONE_NUMBER,
-        to: normalizedPhone,
-      }).catch(err => console.log("SMS send failed:", err));
+      const msg = {
+        to: user.email,
+        from: process.env.SENDGRID_VERIFIED_SENDER,
+        subject: "Labour Hub - Password Changed Successfully",
+        text: "Your Labour Hub Application password has been changed successfully.",
+        html: `
+        <div style="font-family: 'Segoe UI', sans-serif; background-color: #f5f7fa; padding: 40px 0;">
+          <div style="max-width: 600px; background-color: #ffffff; margin: 0 auto; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.1);">
+            
+            <!-- Header -->
+            <div style="background-color: #0a66c2; padding: 25px 20px; text-align: center;">
+              <img src="cid:logo" alt="Labour Hub Logo" width="70" height="70" style="border-radius: 50%; border: 2px solid #ffffff; margin-bottom: 10px;">
+              <h1 style="color: #ffffff; font-size: 24px; margin: 0;">Labour Hub</h1>
+            </div>
 
-      // WhatsApp (sandbox)
-      await client.messages.create({
-        body: "Your Labour Hub Application password has been changed successfully.",
-        from: `whatsapp:${process.env.TWILIO_WHATSAPP_NUMBER}`,
-        to: `whatsapp:${normalizedPhone}`,
-      }).catch(err => console.log("WhatsApp send failed:", err));
+            <!-- Body -->
+            <div style="padding: 30px 25px; color: #333333;">
+              <h2 style="color: #0a66c2; font-size: 20px;">Password Changed Successfully</h2>
+              <p style="font-size: 16px; line-height: 1.6;">
+                Dear <strong>${user.email}</strong>,<br><br>
+                We wanted to let you know that your <strong>Labour Hub</strong> account password has been updated successfully.
+              </p>
+
+              <p style="font-size: 16px; line-height: 1.6;">
+                If you did not request this change, please contact our support team immediately.
+              </p>
+
+              <div style="text-align: center; margin-top: 30px;">
+                <a href="https://labourhub.pk/login" style="background-color: #0a66c2; color: white; text-decoration: none; padding: 12px 25px; border-radius: 8px; font-weight: bold;">
+                  Go to Login
+                </a>
+              </div>
+            </div>
+
+            <!-- Footer -->
+            <div style="background-color: #f0f2f5; text-align: center; padding: 20px; border-top: 1px solid #e1e4e8;">
+              <p style="color: #777777; font-size: 13px; margin: 0;">
+                &copy; ${new Date().getFullYear()} Labour Hub. All rights reserved.<br>
+                Karachi, Pakistan
+              </p>
+            </div>
+          </div>
+        </div>
+        `,
+        attachments: [
+          {
+            content: logoBase64,
+            filename: "logo.png",
+            type: "image/png",
+            disposition: "inline",
+            content_id: "logo",
+          },
+        ],
+      };
+
+      await sgMail.send(msg);
+      console.log(`✅ Email sent successfully to ${user.email}`);
     } catch (err) {
-      console.error("Twilio error:", err);
+      console.error("Email send failed:", err.response ? err.response.body : err);
     }
 
     return res.status(200).json({ message: "Password reset successfully!" });
@@ -774,6 +826,187 @@ app.post("/api/reset-password", async (req, res) => {
 
 
 
+const DEFAULT_IMAGE = "https://png.pngtree.com/png-vector/20231019/ourmid/pngtree-user-profile-avatar-png-image_10211467.png";
+
+// API to get user by ID
+app.get("/api/user/:id", async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select("firstName lastName role email image");
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    res.json({
+      firstName: user.firstName || "",
+      lastName: user.lastName || "",
+      role: user.role || "",
+      email: user.email || "",
+      image: user.image && user.image.trim() !== "" ? user.image : DEFAULT_IMAGE,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+
+
+// ==================== SCHEMA ====================
+const jobSchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  description: { type: String, required: true },
+  location: { type: String, required: true },
+  workersRequired: { type: Number, required: true },
+  skill: { type: String, required: true },
+  budget: { type: Number, required: true },
+  contact: { type: String, required: true },
+  startDate: { type: Date, required: true },
+  endDate: { type: Date, required: true },
+  createdBy: {
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    firstName: String,
+    lastName: String,
+    role: String,
+    image: String,
+    email: String, // NEW FIELD
+  },
+  applicants: [
+    {
+      laborId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+      appliedAt: { type: Date, default: Date.now },
+      status: { type: String, enum: ["pending", "accepted", "rejected"], default: "pending" },
+      chatId: { type: mongoose.Schema.Types.ObjectId, ref: "Chat" },
+    }
+  ],
+  createdAt: { type: Date, default: Date.now },
+});
+
+const Job = mongoose.model("Job", jobSchema);
+
+
+// ==================== ROUTE ====================
+// Create a new job
+app.post("/api/jobs", async (req, res) => {
+  try {
+    const {
+      title,
+      description,
+      location,
+      workersRequired,
+      skill,
+      budget,
+      contact,
+      startDate,
+      endDate,
+      createdBy,
+    } = req.body;
+
+    if (!title || !description || !location || !workersRequired || !skill || !budget || !contact || !startDate || !endDate) {
+      return res.status(400).json({ message: "All fields are required." });
+    }
+
+    const job = new Job({
+      title,
+      description,
+      location,
+      workersRequired,
+      skill,
+      budget,
+      contact,
+      startDate,
+      endDate,
+      createdBy: {
+        ...createdBy,
+        email: createdBy.email, // store email here
+      },
+    });
+
+    await job.save();
+    return res.status(201).json({ message: "Job created successfully", job });
+  } catch (err) {
+    console.error("Error creating job:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+});
+
+
+
+
+// ==================== 1. Get all jobs ====================
+app.get("/api/alljobs", async (req, res) => {
+  try {
+    const jobs = await Job.find().sort({ createdAt: -1 }); // latest jobs first
+    res.status(200).json(jobs);
+  } catch (err) {
+    console.error("Error fetching jobs:", err);
+    res.status(500).json({ message: "Server Error" });
+  }
+});
+
+// ==================== 2. Get jobs created by a specific contractor by email ====================
+app.get("/api/my-jobs-email/:email", async (req, res) => {
+  const { email } = req.params;
+  try {
+    const jobs = await Job.find({ "createdBy.email": email }).sort({ createdAt: -1 });
+    res.status(200).json(jobs);
+  } catch (err) {
+    console.error(`Error fetching jobs for ${email}:`, err);
+    res.status(500).json({ message: "Server Error" });
+  }
+});
+
+app.get("/api/filter", async (req, res) => {
+  try {
+    const {
+      userEmail, // current logged-in user to exclude their jobs
+      location,
+      skill,
+      startDate,
+      endDate,
+      minBudget,
+      maxBudget,
+    } = req.query;
+
+    // Build dynamic query
+    const query = {};
+
+    // Exclude current user's jobs
+    if (userEmail) {
+      query["createdBy.email"] = { $ne: userEmail };
+    }
+
+    if (location) query.location = location;
+    if (skill) query.skill = skill;
+
+    if (startDate && endDate) {
+      query.startDate = { $gte: new Date(startDate) };
+      query.endDate = { $lte: new Date(endDate) };
+    } else if (startDate) {
+      query.startDate = { $gte: new Date(startDate) };
+    } else if (endDate) {
+      query.endDate = { $lte: new Date(endDate) };
+    }
+
+    if (minBudget || maxBudget) {
+      query.budget = {};
+      if (minBudget) query.budget.$gte = Number(minBudget);
+      if (maxBudget) query.budget.$lte = Number(maxBudget);
+    }
+
+    // Fetch filtered jobs
+    const jobs = await Job.find(query).sort({ createdAt: -1 });
+
+    // Fetch dropdown options dynamically
+    const cities = await Job.distinct("location");
+    const skillsList = await Job.distinct("skill");
+
+    res.status(200).json({
+      filters: { cities, skills: skillsList },
+      jobs,
+    });
+  } catch (err) {
+    console.error("Filter Jobs Error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
 
 /* ---------- DB connect & server start ---------- */
 async function start() {
