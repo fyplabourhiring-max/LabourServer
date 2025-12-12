@@ -3,6 +3,7 @@ const multer = require("multer");
 const cloudinary = require("cloudinary").v2;
 const { CloudinaryStorage } = require("multer-storage-cloudinary");
 const fs = require("fs");
+const http = require("http");
 const path = require("path");
 const ffmpeg = require("fluent-ffmpeg");
 const ffmpegPath = require("ffmpeg-static");
@@ -18,6 +19,8 @@ const rateLimit = require("express-rate-limit");
 const validator = require("validator");
 const twilio = require("twilio");
 const sgMail = require("@sendgrid/mail");
+const chatRoutes = require("./chat");
+const { Server } = require("socket.io");
 require("dotenv").config();
 
 
@@ -538,6 +541,19 @@ const authLimiter = rateLimit({
 });
 app.use("/api/", authLimiter);
 
+// Create HTTP server
+const server = http.createServer(app);
+
+// Initialize Socket.IO
+const io = new Server(server, {
+  cors: {
+    origin: "*", // Or your frontend URL
+    methods: ["GET", "POST"]
+  }
+});
+
+app.use("/api/chat", chatRoutes);
+
 /* ---------- Mongoose user schema ---------- */
 const userSchema = new mongoose.Schema(
   {
@@ -551,12 +567,131 @@ const userSchema = new mongoose.Schema(
       type: String, 
       default: "https://res.cloudinary.com/dh7kv5dzy/image/upload/v1762757911/Pngtree_user_profile_avatar_13369988_qdlgmg.png" 
     },
+    skills: { type: [String], default: [] }, // <-- added
     createdAt: { type: Date, default: Date.now },
   },
   { timestamps: true }
 );
 
 const User = mongoose.model("User", userSchema);
+
+// ---------- Get Current User ----------
+app.get("/api/user/:userId", async (req, res) => {
+  try {
+    const user = await User.findById(req.params.userId);
+    if (!user) return res.status(404).json({ message: "User not found" });
+    res.json(user);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// ---------- Get Skills by Email ----------
+app.get("/api/user/skills/:email", async (req, res) => {
+  try {
+    const email = req.params.email.toLowerCase().trim();
+
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    return res.json({
+      success: true,
+      email: user.email,
+      skills: user.skills || []
+    });
+
+  } catch (err) {
+    console.error("Error fetching skills:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error while fetching skills",
+    });
+  }
+});
+
+// ---------- Add Skill ----------
+app.post("/api/user/:email/skills", async (req, res) => {
+  try {
+    const email = req.params.email.toLowerCase().trim();
+    const { skill } = req.body;
+
+    if (!skill || !skill.trim()) {
+      return res.status(400).json({ success: false, message: "Skill is required" });
+    }
+
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    // Prevent duplicates
+    if (user.skills.includes(skill.trim())) {
+      return res.json({ success: true, message: "Skill already exists" });
+    }
+
+    user.skills.push(skill.trim());
+    await user.save();
+
+    return res.json({
+      success: true,
+      message: "Skill added successfully",
+      skills: user.skills,
+    });
+  } catch (err) {
+    console.error("Error adding skill:", err);
+    res.status(500).json({ success: false, message: "Server error while adding skill" });
+  }
+});
+
+// ---------- Delete Skill ----------
+app.delete("/api/user/:email/skills/:index", async (req, res) => {
+  try {
+    const email = req.params.email.toLowerCase().trim();
+    const index = parseInt(req.params.index);
+
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    if (index < 0 || index >= user.skills.length) {
+      return res.status(400).json({ success: false, message: "Invalid skill index" });
+    }
+
+    // Remove the skill by index
+    user.skills.splice(index, 1);
+    await user.save();
+
+    return res.json({
+      success: true,
+      message: "Skill deleted successfully",
+      skills: user.skills,
+    });
+  } catch (err) {
+    console.error("Error deleting skill:", err);
+    res.status(500).json({ success: false, message: "Server error while deleting skill" });
+  }
+});
+
+
+// Get user by email
+app.get("/api/user-by-email/:email", async (req, res) => {
+  try {
+    const { email } = req.params;
+    const user = await User.findOne({ email }).select("firstName lastName email image role");
+    if (!user) return res.status(404).json({ message: "User not found" });
+    res.json(user);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
 
 
 /* ---------- Helpers ---------- */
@@ -835,38 +970,85 @@ app.get("/api/user/:id", async (req, res) => {
 
 
 
+
 // ==================== SCHEMA ====================
 const jobSchema = new mongoose.Schema({
-  title: { type: String, required: true },
-  description: { type: String, required: true },
-  location: { type: String, required: true },
-  workersRequired: { type: Number, required: true },
-  skill: { type: String, required: true },
-  budget: { type: Number, required: true },
-  contact: { type: String, required: true },
-  startDate: { type: Date, required: true },
-  endDate: { type: Date, required: true },
+  title: String,
+  description: String,
+  location: String,
+  workersRequired: Number,
+  skill: String,
+  budget: Number,
+  contact: String,
+  startDate: Date,
+  endDate: Date,
+  shift: { type: String, default: "Shift A" },
+jobTime: { type: Date, default: Date.now },
+
   createdBy: {
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     firstName: String,
     lastName: String,
     role: String,
-    image: String,
-    email: String, // NEW FIELD
+    email: String,
   },
   applicants: [
     {
       laborId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
       appliedAt: { type: Date, default: Date.now },
-      status: { type: String, enum: ["pending", "accepted", "rejected"], default: "pending" },
+      status: { type: String, enum: ["pending","accepted","rejected"], default: "pending" },
       chatId: { type: mongoose.Schema.Types.ObjectId, ref: "Chat" },
     }
   ],
-  createdAt: { type: Date, default: Date.now },
-});
+  noOfWorkersApplied: { type: Number, default: 0 }, // NEW
+}, { timestamps: true });
 
 const Job = mongoose.model("Job", jobSchema);
 
+
+const jobApplicationSchema = new mongoose.Schema({
+  jobId: { type: mongoose.Schema.Types.ObjectId, ref: "Job", required: true },
+  contractorEmail: { type: String, required: true },
+  labourEmail: { type: String, required: true },
+  appliedAt: { type: Date, default: Date.now },
+});
+
+
+
+const JobApplication = mongoose.model("JobApplication", jobApplicationSchema);
+module.exports = JobApplication;
+
+
+app.post("/api/jobs/apply/:jobId", async (req, res) => {
+  const { jobId } = req.params;
+  const { labourId, labourEmail } = req.body; // labour info
+
+  try {
+    const job = await Job.findById(jobId);
+    if (!job) return res.status(404).json({ message: "Job not found" });
+
+    // Check if labour already applied
+    const alreadyApplied = job.applicants.some(app => app.laborId.toString() === labourId);
+    if (alreadyApplied) return res.status(400).json({ message: "Already applied" });
+
+    // Add labour to job
+    job.applicants.push({ laborId: labourId });
+    job.noOfWorkersApplied = job.applicants.length;
+    await job.save();
+
+    // Save in JobApplications collection
+    await JobApplication.create({
+      jobId: job._id,
+      contractorEmail: job.createdBy.email,
+      labourEmail,
+    });
+
+    res.status(200).json({ message: "Applied successfully", job });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Server Error" });
+  }
+});
 
 // ==================== ROUTE ====================
 // Create a new job
@@ -993,6 +1175,340 @@ app.get("/api/filter", async (req, res) => {
     res.status(500).json({ message: "Server error" });
   }
 });
+
+// ==================== PROFILE API ====================
+app.get("/api/profile/:email", async (req, res) => {
+  try {
+    const { email } = req.params;
+    const user = await User.findOne({ email: email.trim().toLowerCase() })
+      .select("firstName lastName role email image createdAt")
+      .lean();
+
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    // Default image if missing
+    const DEFAULT_IMAGE =
+      "https://png.pngtree.com/png-vector/20231019/ourmid/pngtree-user-profile-avatar-png-image_10211467.png";
+    user.image = user.image?.trim() || DEFAULT_IMAGE;
+
+    let jobsCreated = [];
+    let jobsApplied = [];
+    let totalApplicantsOnJobs = 0;
+
+    if (user.role === "Contractor") {
+      // Fetch jobs posted by contractor
+      jobsCreated = await Job.find({ "createdBy.email": email })
+        .sort({ createdAt: -1 })
+        .lean();
+
+      // Count total applicants across all their jobs
+      totalApplicantsOnJobs = jobsCreated.reduce((acc, job) => acc + (job.applicants?.length || 0), 0);
+    } else if (user.role === "Labour") {
+      // Fetch jobs applied to by labour
+      const applications = await Job.find({ "applicants.laborId": user._id })
+        .sort({ createdAt: -1 })
+        .lean();
+
+      jobsApplied = applications.map(job => {
+        const applicant = job.applicants.find(a => a.laborId.toString() === user._id.toString());
+        return {
+          jobId: job._id,
+          title: job.title,
+          status: applicant?.status || "pending",
+          appliedAt: applicant?.appliedAt || null,
+          contractor: job.createdBy,
+        };
+      });
+    }
+
+    res.json({
+      user,
+      stats: {
+        totalJobsPosted: jobsCreated.length,
+        totalJobsApplied: jobsApplied.length,
+        totalApplicantsOnJobs,
+      },
+      jobsCreated,
+      jobsApplied,
+    });
+  } catch (err) {
+    console.error("Profile API error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+
+// ==================== Get jobs a user applied to ====================
+app.get("/api/jobs/user/:email", async (req, res) => {
+  try {
+    const { email } = req.params;
+
+    // Find user
+    const user = await User.findOne({ email: email.trim().toLowerCase() }).lean();
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    // Jobs the user created (if Contractor)
+    const jobsCreated = await Job.find({ "createdBy.email": email }).sort({ createdAt: -1 }).lean();
+
+    // Jobs the user applied to (from JobApplication collection)
+    const jobApplications = await JobApplication.find({ labourEmail: email }).lean();
+
+    const jobsApplied = [];
+    for (const app of jobApplications) {
+      const job = await Job.findById(app.jobId).lean();
+      if (!job) continue;
+
+      jobsApplied.push({
+        jobId: job._id,
+        title: job.title,
+        status: "pending", // default or you can extend to fetch from Job.applicants
+        appliedAt: app.appliedAt,
+        contractor: {
+          firstName: job.createdBy.firstName,
+          lastName: job.createdBy.lastName,
+          email: job.createdBy.email,
+          role: job.createdBy.role,
+          image: job.createdBy.image || "https://png.pngtree.com/png-vector/20231019/ourmid/pngtree-user-profile-avatar-png-image_10211467.png",
+        },
+      });
+    }
+
+    res.status(200).json({
+      user: {
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        role: user.role,
+        image: user.image || "https://png.pngtree.com/png-vector/20231019/ourmid/pngtree-user-profile-avatar-png-image_10211467.png",
+      },
+      stats: {
+        totalJobsPosted: jobsCreated.length,
+        totalJobsApplied: jobsApplied.length,
+      },
+      jobsCreated,
+      jobsApplied,
+    });
+  } catch (err) {
+    console.error("Error fetching user jobs:", err);
+    res.status(500).json({ message: "Server Error" });
+  }
+});
+
+// ==================== Get all responses for jobs posted by a contractor ====================
+app.get("/api/responses-by-contractor/:email", async (req, res) => {
+  try {
+    const { email } = req.params;
+
+    // Step 1: Find all job applications for this contractor
+    const applications = await JobApplication.find({ contractorEmail: email }).lean();
+    if (!applications || applications.length === 0) {
+      return res.status(404).json({ message: "No responses found for this contractor" });
+    }
+
+    // Step 2: For each application, fetch job info and labour info
+    const results = [];
+    for (const app of applications) {
+      const job = await Job.findById(app.jobId).lean();
+      if (!job) continue;
+
+      const labour = await User.findOne({ email: app.labourEmail }).lean();
+
+      results.push({
+        applicationId: app._id,
+        jobId: job._id,
+        jobTitle: job.title,
+        jobDescription: job.description,
+        location: job.location,
+        workersRequired: job.workersRequired,
+        appliedAt: app.appliedAt,
+        labour: {
+          labourId: labour?._id || null,
+          firstName: labour?.firstName || "Unknown",
+          lastName: labour?.lastName || "Unknown",
+          email: labour?.email || app.labourEmail,
+          role: labour?.role || "Labour",
+          image: labour?.image || "https://png.pngtree.com/png-vector/20231019/ourmid/pngtree-user-profile-avatar-png-image_10211467.png",
+        },
+      });
+    }
+
+    res.status(200).json({
+      contractorEmail: email,
+      totalResponses: results.length,
+      responses: results,
+    });
+  } catch (err) {
+    console.error("Error fetching contractor responses:", err);
+    res.status(500).json({ message: "Server Error" });
+  }
+});
+
+// ==================== SEARCH JOBS (by skill + name) ====================
+app.get("/api/search-jobs", async (req, res) => {
+  try {
+    const { skill, name } = req.query;
+
+    // Build query object dynamically
+    const query = {};
+
+    if (skill && skill.trim() !== "") {
+      query.skill = { $regex: new RegExp(skill, "i") };  // case-insensitive match
+    }
+
+    if (name && name.trim() !== "") {
+      query.title = { $regex: new RegExp(name, "i") };
+    }
+
+    const jobs = await Job.find(query).sort({ createdAt: -1 });
+
+    return res.json({
+      success: true,
+      count: jobs.length,
+      jobs,
+    });
+
+  } catch (err) {
+    console.error("Search Jobs Error:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error while searching jobs",
+    });
+  }
+});
+
+
+// // ------------------- Chat Schema -------------------
+// const chatSchema = new mongoose.Schema(
+//   {
+//     participants: [{ type: mongoose.Schema.Types.ObjectId, ref: "User", required: true }],
+//     messages: [
+//       {
+//         sender: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+//         text: { type: String, required: true },
+//         timestamp: { type: Date, default: Date.now },
+//       },
+//     ],
+//   },
+//   { timestamps: true }
+// );
+
+// const Chat = mongoose.model("Chat", chatSchema);
+
+// // ------------------- API -------------------
+// // Get chat history between two users
+// app.get("/api/chats/:user1/:user2", async (req, res) => {
+//   try {
+//     // Use `new` keyword for ObjectId
+//     const user1 = new mongoose.Types.ObjectId(req.params.user1);
+//     const user2 = new mongoose.Types.ObjectId(req.params.user2);
+
+//     let chat = await Chat.findOne({ participants: { $all: [user1, user2] } })
+//       .populate("messages.sender", "firstName lastName email image")
+//       .lean();
+
+//     if (!chat) chat = { messages: [] };
+
+//     const messagesWithSenderInfo = chat.messages.map((msg) => ({
+//       ...msg,
+//       senderInfo: msg.sender,
+//     }));
+
+//     res.json({ messages: messagesWithSenderInfo });
+//   } catch (err) {
+//     console.error("Fetch chat error:", err);
+//     res.status(500).json({ message: "Server error" });
+//   }
+// });
+
+
+// // ------------------- Socket.IO -------------------
+// io.on("connection", (socket) => {
+//   console.log("New socket connected:", socket.id);
+
+//   // Join room
+//   socket.on("join", (userId) => {
+//     socket.join(userId);
+//     console.log(`User ${userId} joined room`);
+//   });
+
+//   // Send message
+//   socket.on("sendMessage", async ({ senderId, receiverId, text }) => {
+//     try {
+//       if (!senderId || !receiverId || !text.trim()) return;
+
+//       const senderObjId = mongoose.Types.ObjectId(senderId);
+//       const receiverObjId = mongoose.Types.ObjectId(receiverId);
+
+//       let chat = await Chat.findOne({
+//         participants: { $all: [senderObjId, receiverObjId] },
+//       });
+
+//       if (!chat) chat = new Chat({ participants: [senderObjId, receiverObjId], messages: [] });
+
+//       chat.messages.push({ sender: senderObjId, text });
+//       await chat.save();
+
+//       const populatedChat = await Chat.findById(chat._id).populate(
+//         "messages.sender",
+//         "firstName lastName email image"
+//       );
+
+//       const lastMessage = populatedChat.messages[populatedChat.messages.length - 1].toObject();
+
+//       const messageToSend = { ...lastMessage, senderInfo: lastMessage.sender };
+
+//       // Emit to both users
+//       io.to(senderId).emit("receiveMessage", messageToSend);
+//       io.to(receiverId).emit("receiveMessage", messageToSend);
+
+//       console.log("Message saved and sent:", messageToSend);
+//     } catch (err) {
+//       console.error("Send message error:", err);
+//     }
+//   });
+// });
+
+// Get user by email
+app.get("/api/get-user-by-email/:email", async (req, res) => {
+  try {
+    const user = await User.findOne({ email: req.params.email }).lean();
+    if (!user) return res.status(404).json({ message: "User not found" });
+    res.json({ id: user._id });
+  } catch (err) {
+    console.error("Fetch user error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+// ================= Check Application Status (Using Logged-in User) =================
+app.get("/api/check-application/:jobId", async (req, res) => {
+  try {
+    const { jobId } = req.params;
+    const userEmail = req.query.email?.trim().toLowerCase();
+
+    if (!userEmail) {
+      return res.status(400).json({ message: "Email is required for testing" });
+    }
+
+    const application = await JobApplication.findOne({
+      jobId,
+      labourEmail: userEmail
+    });
+
+    res.json({
+      applied: !!application,
+      message: application
+        ? "User already applied"
+        : "User has not applied"
+    });
+  } catch (err) {
+    console.error("Error:", err);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+
+
 
 // Industry Mongoose Schema
 const industrySchema = new mongoose.Schema({
