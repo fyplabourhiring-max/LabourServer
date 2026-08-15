@@ -1007,7 +1007,7 @@ const Job = mongoose.model("Job", jobSchema);
 
 
 const jobApplicationSchema = new mongoose.Schema({
-  jobId: { type: mongoose.Schema.Types.ObjectId, ref: "Job", required: true },
+  jobIds: { type: mongoose.Schema.Types.ObjectId, ref: "Job", required: true },
   contractorEmail: { type: String, required: true },
   labourEmail: { type: String, required: true },
   appliedAt: { type: Date, default: Date.now },
